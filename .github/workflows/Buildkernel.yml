@@ -1,0 +1,222 @@
+name: Buildkernel
+on:
+  workflow_dispatch:
+    inputs:
+      Android_Release:
+        description: "Kernel Android Release"
+        required: true
+        type: choice
+        default: '15'
+        options:
+           - '14'
+           - '15'
+      Kernel_Version:
+        description: "Kernel Version"
+        required: true
+        type: choice
+        default: '6.6'
+        options:
+           - '6.1'
+           - '6.6'
+      Security_Patch:
+        description: "(Recommend same as stock kernel)  ㅤㅤㅤKernel Security Patch or lts (latest)"
+        required: true
+        default: '2025-09'
+      Kernel_Suffix:
+        description: "(Recommend same as stock kernel)ㅤ‏‎‏‎‏‎‏‎ ㅤ‏‎‏‎‏‎‏‎ ㅤ‏‎‏‎‏‎‏‎ ㅤ‏‎‏‎‏‎‏‎ (Just delete the dirty suffix,fill in [no]) Kernel Suffix"
+        required: false
+        default: 'g4b48560cd07d-ab14239520-4k'
+      Kernel_Time:
+        description: "(Recommend same as stock kernel)  ㅤㅤㅤKernel Build Timestamp"
+        required: true
+        default: 'Thu Oct  9 05:51:31 UTC 2025'
+      Enable_KPM_Feature:
+        description: "Enable KPM Feature"
+        required: false
+        default: false
+        type: boolean
+
+
+jobs:
+  Details:
+    runs-on: ubuntu-latest
+    env:
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_HARDLINK: "true"
+
+    steps:
+      - name: Maximize build space
+        uses: AdityaGarg8/remove-unwanted-software@v5
+        with:
+          remove-dotnet: 'true'
+          
+      - name: Set up repo
+        run: |
+         curl https://storage.googleapis.com/git-repo-downloads/repo > ~/repo
+         chmod a+x ~/repo
+         sudo mv ~/repo /usr/local/bin/repo
+
+      - name: Sync GKI source code
+        run: |
+         mkdir Buildkernel
+         cd Buildkernel
+         git config --global user.email "usererror404@gmail.com"
+         git config --global user.name "usererror404"
+         repo init -u https://android.googlesource.com/kernel/manifest -b common-android${{ github.event.inputs.Android_Release }}-${{ github.event.inputs.Kernel_Version }}-${{ github.event.inputs.Security_Patch }} --depth=1
+         repo sync
+
+      - name: Fix 6.6 Build
+        if: ${{ github.event.inputs.Kernel_Version == '6.6' }}
+        run: |
+          cd Buildkernel/common
+          FORMATTED_BRANCH="android${{ github.event.inputs.Android_Release }}-${{ github.event.inputs.Kernel_Version }}"
+          # Fake Patch to fix failures
+          fake_patched=0
+          if [ "$FORMATTED_BRANCH" = "android15-6.6" ]; then
+            if ! grep -qxF $'\tunsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;' ./fs/proc/task_mmu.c; then
+              echo "Can't find nr_subpages try to repair"
+              sed -i -e '/int ret = 0, copied = 0;/a \\tunsigned int nr_subpages \= __PAGE_SIZE \/ PAGE_SIZE;' -e '/int ret = 0, copied = 0;/a \\tpagemap_entry_t \*res = NULL;' ./fs/proc/task_mmu.c
+              fake_patched=1
+            fi
+          fi
+
+          if [ "$fake_patched" = 1 ]; then
+            if [ "$FORMATTED_BRANCH" = "android15-6.6" ]; then
+              if grep -qxF $'\tunsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;' ./fs/proc/task_mmu.c; then
+                sed -i -e '/unsigned int nr_subpages \= __PAGE_SIZE \/ PAGE_SIZE;/d' -e '/pagemap_entry_t \*res = NULL;/d' ./fs/proc/task_mmu.c
+              fi
+            fi
+          fi
+
+      - name: Set up SukiSU-Ultra
+        run: |
+         cd Buildkernel
+         curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
+        
+      - name: Set up susfs
+        run: |
+         cd Buildkernel
+         git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android${{ github.event.inputs.Android_Release }}-${{ github.event.inputs.Kernel_Version }}
+         cp susfs4ksu/kernel_patches/50_add_susfs_in_gki-android${{ github.event.inputs.Android_Release }}-${{ github.event.inputs.Kernel_Version }}.patch ./common/
+         cp susfs4ksu/kernel_patches/fs/* ./common/fs/
+         cp susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
+         cd common
+         patch -p1 -F 3 < 50_add_susfs_in_gki-android${{ github.event.inputs.Android_Release }}-${{ github.event.inputs.Kernel_Version }}.patch
+           
+      - name: Add configuration to kernel
+        run: |
+         cd Buildkernel
+         # susfs
+         echo "CONFIG_KSU=y" >> ./common/arch/arm64/configs/gki_defconfig
+         echo "CONFIG_KSU_SUSFS=y" >> ./common/arch/arm64/configs/gki_defconfig
+         echo "CONFIG_KSU_SUSFS_SUS_MAP=y" >> ./common/arch/arm64/configs/gki_defconfig
+         echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> ./common/arch/arm64/configs/gki_defconfig
+         echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
+         echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
+         echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
+         echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> ./common/arch/arm64/configs/gki_defconfig
+         echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
+         echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
+         echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> ./common/arch/arm64/configs/gki_defconfig
+         echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> ./common/arch/arm64/configs/gki_defconfig
+         echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> ./common/arch/arm64/configs/gki_defconfig
+         echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> ./common/arch/arm64/configs/gki_defconfig
+         echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> ./common/arch/arm64/configs/gki_defconfig
+         # tmpfs
+         echo "CONFIG_TMPFS_XATTR=y" >> ./common/arch/arm64/configs/gki_defconfig
+         echo "CONFIG_TMPFS_POSIX_ACL=y" >> ./common/arch/arm64/configs/gki_defconfig
+         sed -i 's/check_defconfig//' ./common/build.config.gki
+         echo -e "\e[33m[Done]\e[0m" Add configuration to kernel
+      
+      - name: Add KPM configuration to kernel
+        if: ${{inputs.Enable_KPM_Feature }}
+        run: |
+         cd Buildkernel
+         echo "CONFIG_KPM=y" >> ./common/arch/arm64/configs/gki_defconfig
+         echo -e "\e[33m[Done]\e[0m" Add KPM configuration to kernel
+         echo -e "\e[33m[Done]\e[0m" Enable KPM feature
+
+      - name: Set up kernel suffix
+        run: |
+         cd Buildkernel
+         if [ "${{ github.event.inputs.Kernel_Version }}" = "6.1" ] &&  [ "${{ github.event.inputs.Kernel_Suffix }}" = "no" ]; then
+          sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" ./build/kernel/kleaf/impl/stamp.bzl
+          echo -e "\e[33m[Done]\e[0m" Delete the dirty suffix
+         fi
+         if [ "${{ github.event.inputs.Kernel_Version }}" = "6.6" ] &&  [ "${{ github.event.inputs.Kernel_Suffix }}" = "no" ]; then
+          sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" ./build/kernel/kleaf/impl/stamp.bzl
+          sed -i '/^CONFIG_LOCALVERSION=/ s/="\([^"]*\)"/=""/' ./common/arch/arm64/configs/gki_defconfig
+          echo -e "\e[33m[Done]\e[0m" Delete the dirty suffix
+         fi         
+         if [ "${{ github.event.inputs.Kernel_Version }}" = "6.1" ] && [ "${{ github.event.inputs.Kernel_Suffix }}" != "no" ]; then
+          sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" ./build/kernel/kleaf/impl/stamp.bzl
+          sed -i '$s|echo "\$res"|echo "$res-${{ github.event.inputs.Kernel_Suffix }}"|' ./common/scripts/setlocalversion
+          echo -e "\e[33m[Done]\e[0m" Set up custom suffix
+         fi
+         if [ "${{ github.event.inputs.Kernel_Version }}" = "6.6" ] && [ "${{ github.event.inputs.Kernel_Suffix }}" != "no" ]; then
+          sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" ./build/kernel/kleaf/impl/stamp.bzl
+          sed -i "\$s|echo \"\\\$res\"|echo \"-${{ github.event.inputs.kernel_suffix }}\"|" ./common/scripts/setlocalversion
+          sudo sed -i "s/-4k/-${{ github.event.inputs.Kernel_Suffix }}/g" ./common/arch/arm64/configs/gki_defconfig
+          echo -e "\e[33m[Done]\e[0m" Set up custom suffix
+         fi
+
+      - name: Set up kernel build timestamp
+        run: |
+         cd Buildkernel
+         perl -pi -e "s{UTS_VERSION=\"\\\$\(echo \\\$UTS_VERSION \\\$CONFIG_FLAGS \\\$TIMESTAMP \\| cut -b -\\\$UTS_LEN\)\"}{UTS_VERSION=\"#1 SMP PREEMPT ${{ github.event.inputs.Kernel_Time }}\"}" ./common/scripts/mkcompile_h
+         sed -i -e "s|\$(preempt-flag-y) \"\$(build-timestamp)\"|\$(preempt-flag-y) \"${{ github.event.inputs.Kernel_Time }}\"|" ./common/init/Makefile
+         echo -e "\e[33m[Done]\e[0m" Set up kernel build timestamp
+
+      - name: Build kernel
+        run: |
+         cd Buildkernel
+         sed -i '/^[[:space:]]*"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",$/d' ./common/BUILD.bazel
+         rm -rf ./common/android/abi_gki_protected_exports_*
+         sed -i 's/BUILD_SYSTEM_DLKM=1/BUILD_SYSTEM_DLKM=0/' common/build.config.gki.aarch64
+         sed -i '/MODULES_ORDER=android\/gki_aarch64_modules/d' common/build.config.gki.aarch64
+         sed -i '/KMI_SYMBOL_LIST_STRICT_MODE/d' common/build.config.gki.aarch64
+         tools/bazel run --config=fast --lto=thin //common:kernel_aarch64_dist -- --destdir=dist
+         
+      - name: KPM patch
+        if: ${{inputs.Enable_KPM_Feature }}
+        run: |
+         cd Buildkernel/dist
+         curl -LO "https://raw.githubusercontent.com/ShirkNeko/SukiSU_patch/refs/heads/main/kpm/patch_linux"
+         chmod 777 patch_linux
+         ./patch_linux
+         rm Image
+         mv oImage Image
+         echo -e "\e[33m[Done]\e[0m" KPM feature is enabled
+         
+      - name: Output kernel
+        run: |
+         cd Buildkernel/dist
+         cp Image kernel
+
+      - name: Set up AnyKernel3
+        run: |
+         cd Buildkernel
+         git clone https://github.com/SukiSU-Ultra/SukiSU_patch.git
+
+      - name: Create AnyKernel3
+        run: |
+         cd Buildkernel/SukiSU_patch/AnyKernel3
+         cp /home/runner/work/PxGKI/PxGKI/Buildkernel/dist/Image /home/runner/work/PxGKI/PxGKI/Buildkernel/SukiSU_patch/AnyKernel3/
+         zip -r "android${{ github.event.inputs.Android_Release }}-${{ github.event.inputs.Kernel_Version }}-AnyKernel3.zip" ./*         
+
+      - name: Output AnyKernel3
+        run: |
+         cd Buildkernel
+         mkdir patched
+         cd patched
+         cp /home/runner/work/PxGKI/PxGKI/Buildkernel/dist/kernel /home/runner/work/PxGKI/PxGKI/Buildkernel/patched/
+         cp /home/runner/work/PxGKI/PxGKI/Buildkernel/SukiSU_patch/AnyKernel3/android${{ github.event.inputs.Android_Release }}-${{ github.event.inputs.Kernel_Version }}-AnyKernel3.zip /home/runner/work/PxGKI/PxGKI/Buildkernel/patched/
+
+      - name: Upload Kernel and AnyKernel3
+        uses: actions/upload-artifact@v5
+        with:
+          name: Kernel&AnyKernel3-android${{ github.event.inputs.Android_Release }}-${{ github.event.inputs.Kernel_Version }}
+          path: |
+            Buildkernel/patched/kernel
+            Buildkernel/patched/*.zip
